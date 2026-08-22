@@ -52,6 +52,10 @@ class TestServerRename:
         )
         mock_server = MagicMock()
         mock_server.get_document.return_value = mock_doc
+        mock_server.parser = server_module.XonshParser()
+        mock_server.parse_document.return_value = mock_server.parser.parse(
+            mock_doc.source
+        )
         mock_server.python_delegate.rename = AsyncMock(return_value=backend_edit)
         monkeypatch.setattr(server_module, "server", mock_server)
         return mock_server
@@ -89,13 +93,15 @@ class TestServerRename:
         patched_server.python_delegate.rename.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_does_not_rename_env_var(self, monkeypatch):
-        """Env vars are filtered out before the backend is asked."""
+    async def test_renames_env_var_without_backend(self, monkeypatch):
+        """Env vars are renamed via the xonsh parse tree, not the backend."""
         doc = MagicMock()
-        doc.source = "$VALUE = 'x'\nprint($VALUE)\n"
+        doc.source = "$VALUE = 'x'\nprint($VALUE)\necho ${VALUE}\n"
         doc.path = "/test/file.xsh"
         mock_server = MagicMock()
         mock_server.get_document.return_value = doc
+        mock_server.parser = server_module.XonshParser()
+        mock_server.parse_document.return_value = mock_server.parser.parse(doc.source)
         mock_server.python_delegate.rename = AsyncMock(return_value=None)
         monkeypatch.setattr(server_module, "server", mock_server)
 
@@ -107,7 +113,14 @@ class TestServerRename:
 
         result = await server_module.rename(params)
 
-        assert result is None
+        assert result is not None
+        edits = result.changes["file:///test/file.xsh"]
+        starts = sorted(
+            (e.range.start.line, e.range.start.character) for e in edits
+        )
+        # Name spans only: after `$` on lines 0-1, after `${` on line 2.
+        assert starts == [(0, 1), (1, 7), (2, 7)]
+        assert all(e.new_text == "RENAMED" for e in edits)
         mock_server.python_delegate.rename.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -115,6 +128,10 @@ class TestServerRename:
         """A backend that refuses to rename surfaces as None."""
         mock_server = MagicMock()
         mock_server.get_document.return_value = mock_doc
+        mock_server.parser = server_module.XonshParser()
+        mock_server.parse_document.return_value = mock_server.parser.parse(
+            mock_doc.source
+        )
         mock_server.python_delegate.rename = AsyncMock(return_value=None)
         monkeypatch.setattr(server_module, "server", mock_server)
 

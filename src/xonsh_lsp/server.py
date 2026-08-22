@@ -160,6 +160,50 @@ def _python_identifier_range_at_position(
     return None
 
 
+def _env_var_edits(
+    parser: XonshParser,
+    parse_result: ParseResult,
+    line: int,
+    character: int,
+    new_name: str,
+) -> list[lsp.TextEdit] | None:
+    """TextEdits renaming the env var under the cursor, current doc only.
+
+    Covers `$FOO`, `${FOO}` and `${'FOO'}` occurrences of the same variable.
+    Returns None when the cursor is not on an env variable.
+    """
+    def contains(node) -> bool:
+        return node.start_point <= (line, character) <= node.end_point
+
+    target = next((n for n in parse_result.env_variables if contains(n)), None)
+    if target is None:
+        return None
+    name = parser.get_env_var_name(target)
+    if not name:
+        return None
+
+    edits: list[lsp.TextEdit] = []
+    for node in parse_result.env_variables:
+        if parser.get_env_var_name(node) != name:
+            continue
+        offset = node.text.find(name)
+        if offset < 0:
+            continue
+        row, col = node.start_point
+        edits.append(
+            lsp.TextEdit(
+                range=lsp.Range(
+                    start=lsp.Position(line=row, character=col + offset),
+                    end=lsp.Position(
+                        line=row, character=col + offset + len(name)
+                    ),
+                ),
+                new_text=new_name,
+            )
+        )
+    return edits or None
+
+
 def _create_backend(
     backend_name: str,
     backend_command: list[str] | None,
@@ -470,7 +514,7 @@ async def references(params: lsp.ReferenceParams) -> list[lsp.Location] | None:
 
 @server.feature(lsp.TEXT_DOCUMENT_RENAME, lsp.RenameOptions(prepare_provider=False))
 async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
-    """Rename Python identifiers."""
+    """Rename Python identifiers and xonsh env variables."""
     uri = params.text_document.uri
     doc = server.get_document(uri)
     if doc is None:
@@ -478,6 +522,19 @@ async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
 
     if not _is_python_identifier(params.new_name):
         return None
+
+    # Env variables are renamed via the xonsh parse tree, current doc only.
+    parse_result = server.parse_document(uri)
+    if parse_result is not None:
+        env_edits = _env_var_edits(
+            server.parser,
+            parse_result,
+            params.position.line,
+            params.position.character,
+            params.new_name,
+        )
+        if env_edits:
+            return lsp.WorkspaceEdit(changes={uri: env_edits})
 
     # Reject env vars and other non-Python-identifier targets up front so
     # backends don't get asked to rename `FOO` inside `$FOO`.
