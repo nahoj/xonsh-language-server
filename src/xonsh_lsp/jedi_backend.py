@@ -332,8 +332,13 @@ class JediBackend:
                         new_name,
                         is_current=is_current,
                     )
-                    if text_edit is not None:
-                        edits.append(text_edit)
+                    if text_edit is None:
+                        # An occurrence we cannot map back (masked xonsh
+                        # line): applying the rest would be a partial rename
+                        # that silently corrupts code, so refuse entirely.
+                        logger.debug("Unmappable rename edit; refusing rename")
+                        return None
+                    edits.append(text_edit)
 
                 if edits:
                     changes.setdefault(target_uri, []).extend(edits)

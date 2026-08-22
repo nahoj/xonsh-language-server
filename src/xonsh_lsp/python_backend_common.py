@@ -4,7 +4,7 @@ from xonsh_lsp.preprocessing import PreprocessResult, map_position_from_processe
 
 
 def remap_text_edit(
-    pp: PreprocessResult,
+    pp: PreprocessResult | None,
     start_line: int,
     start_col: int,
     end_line: int,
@@ -25,6 +25,8 @@ def remap_text_edit(
     coordinates are used as-is.
     """
     if is_current:
+        if pp is None:
+            return None
         start_line -= preamble_offset
         end_line -= preamble_offset
         if start_line < 0:

@@ -659,7 +659,7 @@ class LspProxyBackend:
             if result is None:
                 return None
 
-            return self._remap_workspace_edit(result, preprocess_result, uri)
+            return self._remap_workspace_edit(result)
 
         except Exception as e:
             logger.debug(f"Proxy rename error: {e}")
@@ -668,42 +668,55 @@ class LspProxyBackend:
     def _remap_workspace_edit(
         self,
         edit: lsp.WorkspaceEdit,
-        current_pp: PreprocessResult,
-        current_uri: str,
     ) -> lsp.WorkspaceEdit | None:
         """Remap a WorkspaceEdit from child coordinates to original xonsh.
 
+        Edits targeting any document this proxy synced (every open xonsh doc,
+        not just the current one) are in that document's preprocessed +
+        preamble-shifted coordinates and are remapped with its own sync state.
+        Edits to files the child read from disk pass through unchanged.
+
         Only `changes` and `TextDocumentEdit` entries in `document_changes` are
         kept. File-level operations (create/rename/delete file) are dropped.
+
+        Fails closed: if any edit to a synced document cannot be mapped back
+        (masked line, preamble region), the whole rename is refused — applying
+        a partial rename would silently corrupt code.
         """
-        preamble = self._preamble_offset(current_uri)
 
         def remap_edits(
             child_uri: str, edits: Sequence[lsp.TextEdit]
-        ) -> tuple[str, list[lsp.TextEdit]]:
+        ) -> tuple[str, list[lsp.TextEdit]] | None:
             original_uri = self._uri_map.get(child_uri, child_uri)
-            is_current = child_uri == current_uri
+            state = self._sync_state.get(child_uri)
             remapped: list[lsp.TextEdit] = []
             for e in edits:
                 text_edit = remap_text_edit(
-                    current_pp,
+                    state.preprocess_result if state else None,
                     e.range.start.line,
                     e.range.start.character,
                     e.range.end.line,
                     e.range.end.character,
                     e.new_text,
-                    is_current=is_current,
-                    preamble_offset=preamble,
+                    is_current=state is not None,
+                    preamble_offset=state.preamble_lines if state else 0,
                 )
-                if text_edit is not None:
-                    remapped.append(text_edit)
+                if text_edit is None:
+                    logger.debug(
+                        f"Unmappable rename edit in {child_uri}; refusing rename"
+                    )
+                    return None
+                remapped.append(text_edit)
             return original_uri, remapped
 
         changes: dict[str, list[lsp.TextEdit]] = {}
 
         if edit.changes:
             for child_uri, edits in edit.changes.items():
-                target_uri, remapped = remap_edits(child_uri, edits)
+                result = remap_edits(child_uri, edits)
+                if result is None:
+                    return None
+                target_uri, remapped = result
                 if remapped:
                     changes.setdefault(target_uri, []).extend(remapped)
 
@@ -715,7 +728,10 @@ class LspProxyBackend:
                 text_edits = [
                     te for te in doc_change.edits if isinstance(te, lsp.TextEdit)
                 ]
-                target_uri, remapped = remap_edits(child_uri, text_edits)
+                result = remap_edits(child_uri, text_edits)
+                if result is None:
+                    return None
+                target_uri, remapped = result
                 if remapped:
                     changes.setdefault(target_uri, []).extend(remapped)
 
